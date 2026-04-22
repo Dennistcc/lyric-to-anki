@@ -51,24 +51,27 @@ function App() {
         setStatus(`⚠️ 字典載入失敗: ${err.message}`);
       });
 
-    // 2. 載入 Tokenizer (CDN 模式)
-    const initTokenizer = () => {
-      if (window.kuromoji) {
-        window.kuromoji.builder({ 
-          dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
-        }).build((err, _tokenizer) => {
-          if (!err && _tokenizer) {
-            setTokenizer(_tokenizer);
-            setResourcesReady(prev => ({ ...prev, tokenizer: true }));
-          } else {
-            setStatus('❌ 分詞器初始化失敗');
-          }
-        });
+    // 在 App.jsx 內的 useEffect 替換這段
+const initTokenizer = () => {
+  if (window.kuromoji) {
+    console.log("Kuromoji library detected, building...");
+    window.kuromoji.builder({ 
+      dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
+    }).build((err, _tokenizer) => {
+      if (!err && _tokenizer) {
+        setTokenizer(_tokenizer);
+        setResourcesReady(prev => ({ ...prev, tokenizer: true }));
       } else {
-        // 如果 script 標籤還沒完成載入，過一秒重試
-        setTimeout(initTokenizer, 500);
+        console.error("Tokenizer Build Error:", err);
+        setStatus('❌ 分詞器初始化失敗');
       }
-    };
+    });
+  } else {
+    // 縮短重試時間，並在 Console 記錄狀態
+    console.log("Waiting for Kuromoji script...");
+    setTimeout(initTokenizer, 200); 
+  }
+};
     initTokenizer();
   }, []);
 
