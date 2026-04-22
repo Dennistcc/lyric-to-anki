@@ -8,7 +8,7 @@ function App() {
   const [status, setStatus] = useState('系統就緒');
   const [tokenizer, setTokenizer] = useState(null);
   const [dictionary, setDictionary] = useState(null); 
-  const [showResult, setShowResult] = useState(false);
+  const [showResult, setShowResult] = useState(true);
 
   const toHiragana = (str) => {
     if (!str) return '';
