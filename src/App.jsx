@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Papa from 'papaparse';
 
-// --- 外部工具函式 ---
+// --- 工具函式 (保持不變) ---
 const toHiragana = (str) => {
   if (!str) return '';
   return str.replace(/[\u30a1-\u30f6]/g, (m) => String.fromCharCode(m.charCodeAt(0) - 0x60));
@@ -17,18 +17,15 @@ const extractMeaning = (m) => {
     return String(val);
   };
   const text = recursiveExtract(m);
-  const englishOnly = text.split(/[;/、\n]/)
-    .map(p => p.trim())
-    .filter(p => /[a-zA-Z]/.test(p) && !/[\u4e00-\u9faf\u3040-\u309f]/.test(p) && p.length > 1);
+  const englishOnly = text.split(/[;/、\n]/).map(p => p.trim()).filter(p => /[a-zA-Z]/.test(p) && !/[\u4e00-\u9faf\u3040-\u309f]/.test(p) && p.length > 1);
   return englishOnly.length > 0 ? [...new Set(englishOnly)].slice(0, 3).join(' / ') : text.substring(0, 50);
 };
 
 function App() {
-  // --- State ---
   const [inputText, setInputText] = useState('');
   const [words, setWords] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
-  const [status, setStatus] = useState('系統初始化中...');
+  const [status, setStatus] = useState('🔍 正在確認資源狀態...');
   const [resourcesReady, setResourcesReady] = useState({ dict: false, tokenizer: false });
   const [tokenizer, setTokenizer] = useState(null);
   const [dictionary, setDictionary] = useState(null);
@@ -36,13 +33,17 @@ function App() {
 
   // --- 初始化資源 ---
   useEffect(() => {
-    // 1. 載入字典 (確保檔案放在 public/processed_dict.json)
-    fetch('/processed_dict.json')
+    console.log("初始化開始...");
+
+    // 1. 載入字典
+    // 加上 timestamp 避免 Vercel 緩存舊版 404 頁面
+    fetch(`/processed_dict.json?v=${Date.now()}`)
       .then(res => {
-        if (!res.ok) throw new Error(`找不到字典檔 (${res.status})`);
+        if (!res.ok) throw new Error(`找不到字典檔 (${res.status})，請確認檔案在 public/processed_dict.json`);
         return res.json();
       })
       .then(data => {
+        console.log("✅ 字典載入成功");
         setDictionary(data);
         setResourcesReady(prev => ({ ...prev, dict: true }));
       })
@@ -51,53 +52,58 @@ function App() {
         setStatus(`⚠️ 字典載入失敗: ${err.message}`);
       });
 
-    // 在 App.jsx 內的 useEffect 替換這段
-const initTokenizer = () => {
-  if (window.kuromoji) {
-    console.log("Kuromoji library detected, building...");
-    window.kuromoji.builder({ 
-      dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
-    }).build((err, _tokenizer) => {
-      if (!err && _tokenizer) {
-        setTokenizer(_tokenizer);
-        setResourcesReady(prev => ({ ...prev, tokenizer: true }));
+    // 2. 載入 Tokenizer
+    let retryCount = 0;
+    const initTokenizer = () => {
+      if (window.kuromoji) {
+        console.log("✅ 檢測到 Kuromoji 腳本，開始建構...");
+        window.kuromoji.builder({ 
+          dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
+        }).build((err, _tokenizer) => {
+          if (!err && _tokenizer) {
+            setTokenizer(_tokenizer);
+            setResourcesReady(prev => ({ ...prev, tokenizer: true }));
+            console.log("✅ Tokenizer 建構完成");
+          } else {
+            console.error("Tokenizer Build Error:", err);
+            setStatus(`❌ 分詞器建構失敗: ${err?.message || '未知錯誤'}`);
+          }
+        });
       } else {
-        console.error("Tokenizer Build Error:", err);
-        setStatus('❌ 分詞器初始化失敗');
+        retryCount++;
+        console.log(`等待 Kuromoji 腳本中... (${retryCount}/30)`);
+        if (retryCount < 30) {
+          setTimeout(initTokenizer, 300);
+        } else {
+          setStatus('❌ 找不到 Kuromoji 腳本，請檢查 index.html 的 script 標籤');
+        }
       }
-    });
-  } else {
-    // 縮短重試時間，並在 Console 記錄狀態
-    console.log("Waiting for Kuromoji script...");
-    setTimeout(initTokenizer, 200); 
-  }
-};
+    };
     initTokenizer();
   }, []);
 
-  // 當資源都準備好時更新狀態
+  // 監聽狀態更新
   useEffect(() => {
     if (resourcesReady.dict && resourcesReady.tokenizer) {
       setStatus('✅ 系統就緒');
+    } else if (resourcesReady.dict) {
+      setStatus('⏳ 字典已 OK，正在載入分詞器...');
+    } else if (resourcesReady.tokenizer) {
+      setStatus('⏳ 分詞器已 OK，正在下載字典檔...');
     }
   }, [resourcesReady]);
 
   // --- 解析邏輯 ---
   const handleParse = useCallback(() => {
     if (!tokenizer || !dictionary || !inputText.trim()) return;
-
     try {
       setStatus('🔍 正在解析日文結構...');
       const tokens = tokenizer.tokenize(inputText);
-      
       const processed = [];
       for (let i = 0; i < tokens.length; i++) {
         let current = tokens[i];
         let next = tokens[i + 1];
-        const isSaven = current.pos === '名詞' && next && 
-                        (next.pos === '動詞' || next.pos === '助動詞') &&
-                        /^[さしすせそじずぜぞ]/.test(next.surface_form);
-
+        const isSaven = current.pos === '名詞' && next && (next.pos === '動詞' || next.pos === '助動詞') && /^[さしすせそじずぜぞ]/.test(next.surface_form);
         if (isSaven) {
           let surface = current.surface_form;
           while (tokens[i + 1] && (['動詞', '助動詞'].includes(tokens[i + 1].pos) || tokens[i+1].pos_detail_1 === '接尾')) {
@@ -121,32 +127,19 @@ const initTokenizer = () => {
         const cur = filtered[i];
         const nxt = filtered[i + 1];
         const combinedStr = nxt ? cur.surface + nxt.surface : null;
-
         if (combinedStr && dictionary[combinedStr]) {
           const entry = dictionary[combinedStr];
-          finalized.push({
-            surface: combinedStr, base: combinedStr,
-            reading: entry.r ? toHiragana(entry.r) : (cur.reading + nxt.reading),
-            english: extractMeaning(entry.m),
-            pos: '複合詞', id: i
-          });
+          finalized.push({ surface: combinedStr, base: combinedStr, reading: entry.r ? toHiragana(entry.r) : (cur.reading + nxt.reading), english: extractMeaning(entry.m), pos: '複合詞', id: i });
           i++;
         } else {
           const entry = dictionary[cur.base] || dictionary[cur.surface];
-          finalized.push({
-            ...cur,
-            reading: (entry && entry.r) ? toHiragana(entry.r) : cur.reading,
-            english: extractMeaning(entry?.m),
-            verbType: entry?.t || (entry?.p?.includes('vi') ? '自動詞' : entry?.p?.includes('vt') ? '他動詞' : ''),
-            id: i
-          });
+          finalized.push({ ...cur, reading: (entry && entry.r) ? toHiragana(entry.r) : cur.reading, english: extractMeaning(entry?.m), verbType: entry?.t || (entry?.p?.includes('vi') ? '自動詞' : entry?.p?.includes('vt') ? '他動詞' : ''), id: i });
         }
       }
 
       const uniqueMap = new Map();
       finalized.forEach(f => { if (!uniqueMap.has(f.base)) uniqueMap.set(f.base, f); });
       const uniqueList = Array.from(uniqueMap.values());
-
       setWords(uniqueList);
       setSelectedIds(new Set(uniqueList.map(w => w.id)));
       setShowResult(true);
@@ -157,15 +150,13 @@ const initTokenizer = () => {
     }
   }, [tokenizer, dictionary, inputText]);
 
-  // --- 高亮歌詞渲染 ---
+  // --- 高亮渲染與樣式 ---
   const highlightedLyrics = useMemo(() => {
     if (!showResult || !inputText) return null;
     const activeWords = words.filter(w => selectedIds.has(w.id));
     if (activeWords.length === 0) return inputText;
-
     const sortedSurfaces = activeWords.map(w => w.surface).sort((a, b) => b.length - a.length);
     const regex = new RegExp(`(${sortedSurfaces.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
-    
     return inputText.split(regex).map((part, i) => {
       const info = activeWords.find(w => w.surface === part);
       return info ? (
@@ -180,74 +171,59 @@ const initTokenizer = () => {
   return (
     <div className="container">
       <style>{`
-        :root { --muji-blue: #eef2f6; --muji-text: #55606b; --muji-border: #d1d9e0; --accent-blue: #94a3b8; }
-        body { background-color: #f1f5f9; margin: 0; font-family: -apple-system, "PingFang TC", sans-serif; }
+        :root { --muji-text: #55606b; --muji-border: #d1d9e0; --accent-blue: #94a3b8; }
+        body { background-color: #f1f5f9; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
         .container { padding: 40px 20px; max-width: 900px; margin: 0 auto; min-height: 100vh; }
-        .status-tag { text-align: center; font-size: 11px; color: var(--accent-blue); letter-spacing: 2px; margin-bottom: 12px; text-transform: uppercase; }
+        .status-tag { text-align: center; font-size: 12px; color: var(--accent-blue); font-weight: bold; margin-bottom: 12px; }
         h1 { text-align: center; font-weight: 300; letter-spacing: 6px; margin-bottom: 40px; color: var(--muji-text); }
         h1 span { font-weight: 600; color: var(--accent-blue); }
-        textarea { width: 100%; height: 300px; padding: 25px; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 18px; resize: none; box-sizing: border-box; outline: none; transition: border 0.3s; line-height: 1.6; }
-        textarea:focus { border-color: var(--accent-blue); }
-        .btn-main { width: 100%; padding: 18px; margin-top: 24px; background: var(--muji-text); color: white; border: none; border-radius: 12px; cursor: pointer; font-size: 16px; letter-spacing: 2px; transition: 0.3s; }
-        .btn-main:hover:not(:disabled) { background: #3f4a54; transform: translateY(-1px); }
+        textarea { width: 100%; height: 280px; padding: 25px; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 18px; resize: none; box-sizing: border-box; outline: none; transition: 0.3s; line-height: 1.6; }
+        textarea:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.1); }
+        .btn-main { width: 100%; padding: 18px; margin-top: 24px; background: var(--muji-text); color: white; border: none; border-radius: 12px; cursor: pointer; font-size: 16px; font-weight: 500; transition: 0.3s; }
         .btn-main:disabled { background: #cbd5e1; cursor: not-allowed; }
         .lyrics-box { white-space: pre-wrap; line-height: 2.5; padding: 35px; background: white; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
         .highlighted-word { border-bottom: 2px solid var(--accent-blue); position: relative; cursor: help; padding: 0 2px; }
-        .tooltip { visibility: hidden; position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); background: #334155; color: white; padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 100; white-space: nowrap; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); opacity: 0; transition: opacity 0.2s; }
+        .tooltip { visibility: hidden; position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); background: #334155; color: white; padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 100; white-space: nowrap; opacity: 0; transition: 0.2s; }
         .highlighted-word:hover .tooltip { visibility: visible; opacity: 1; }
         .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin-top: 40px; }
-        .card { padding: 24px; background: white; border: 1px solid var(--muji-border); border-radius: 12px; cursor: pointer; transition: 0.3s; }
-        .card.selected { border-left: 6px solid var(--accent-blue); background: #f8fafc; transform: translateX(4px); }
-        .card strong { display: block; font-size: 1.2rem; margin-bottom: 4px; color: #1e293b; }
-        .card small { color: #64748b; font-size: 12px; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; }
+        .card { padding: 20px; background: white; border: 1px solid var(--muji-border); border-radius: 12px; cursor: pointer; transition: 0.2s; }
+        .card.selected { border-left: 6px solid var(--accent-blue); background: #f8fafc; }
+        .card strong { display: block; font-size: 1.1rem; color: #1e293b; }
       `}</style>
 
-      <div className="status-tag">— {status} —</div>
+      <div className="status-tag">STATUS: {status}</div>
       <h1>LANGLAB <span>PRO</span></h1>
 
       {!showResult ? (
-        <div style={{ position: 'relative', zIndex: 10 }}>
+        <div>
           <textarea 
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="請在此貼上日文歌詞 (例如 YOASOBI 的歌曲)..."
-            disabled={!resourcesReady.tokenizer}
+            placeholder="請輸入日文歌詞..."
+            disabled={!resourcesReady.tokenizer || !resourcesReady.dict}
           />
           <button 
             className="btn-main" 
             onClick={handleParse}
-            disabled={!resourcesReady.tokenizer || !inputText.trim()}
+            disabled={!resourcesReady.tokenizer || !resourcesReady.dict || !inputText.trim()}
           >
-            {resourcesReady.tokenizer ? '解析歌詞' : '系統加載中...'}
+            {resourcesReady.tokenizer && resourcesReady.dict ? '開始解析' : '正在準備資源...'}
           </button>
         </div>
       ) : (
         <div>
-          <button 
-            onClick={() => setShowResult(false)} 
-            style={{ marginBottom: '20px', padding: '8px 16px', borderRadius: '8px', border: '1px solid #ddd', background: 'white', cursor: 'pointer' }}
-          >
-            ← 返回重新輸入
-          </button>
+          <button onClick={() => setShowResult(false)} style={{ marginBottom: '20px', padding: '8px 12px', cursor: 'pointer' }}>← 返回</button>
           <div className="lyrics-box">{highlightedLyrics}</div>
-          
           <div className="card-grid">
             {words.map(w => (
-              <div 
-                key={w.id} 
-                className={`card ${selectedIds.has(w.id) ? 'selected' : ''}`}
-                onClick={() => {
-                  const n = new Set(selectedIds);
-                  n.has(w.id) ? n.delete(w.id) : n.add(w.id);
-                  setSelectedIds(n);
-                }}
-              >
-                <strong>{w.base}</strong> 
-                {w.verbType && <small>{w.verbType}</small>}
-                <div style={{ color: 'var(--accent-blue)', fontSize: '15px', marginTop: '4px' }}>{w.reading}</div>
-                <div style={{ marginTop: '12px', fontSize: '14px', color: '#475569', borderTop: '1px solid #f1f5f9', paddingTop: '8px' }}>
-                  {w.english}
-                </div>
+              <div key={w.id} className={`card ${selectedIds.has(w.id) ? 'selected' : ''}`} onClick={() => {
+                const n = new Set(selectedIds);
+                n.has(w.id) ? n.delete(w.id) : n.add(w.id);
+                setSelectedIds(n);
+              }}>
+                <strong>{w.base}</strong>
+                <div style={{ color: 'var(--accent-blue)', fontSize: '14px' }}>{w.reading}</div>
+                <div style={{ marginTop: '8px', fontSize: '13px', color: '#475569' }}>{w.english}</div>
               </div>
             ))}
           </div>
