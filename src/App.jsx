@@ -1,6 +1,7 @@
 /* global kuromoji */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Papa from 'papaparse';
+import dictData from './processed_dict.json';
 
 // --- 工具函式 (保持不變) ---
 const toHiragana = (str) => {
@@ -35,47 +36,35 @@ function App() {
   useEffect(() => {
     console.log("初始化開始...");
 
-    // 1. 載入字典
-    // 加上 timestamp 避免 Vercel 緩存舊版 404 頁面
-    fetch(`/processed_dict.json?v=${Date.now()}`)
-      .then(res => {
-        if (!res.ok) throw new Error(`找不到字典檔 (${res.status})，請確認檔案在 public/processed_dict.json`);
-        return res.json();
-      })
-      .then(data => {
-        console.log("✅ 字典載入成功");
-        setDictionary(data);
-        setResourcesReady(prev => ({ ...prev, dict: true }));
-      })
-      .catch(err => {
-        console.error(err);
-        setStatus(`⚠️ 字典載入失敗: ${err.message}`);
-      });
+    // 2. 字典處理：直接從 import 的資料設定，不再用 fetch
+    if (dictData) {
+      setDictionary(dictData);
+      setResourcesReady(prev => ({ ...prev, dict: true }));
+      console.log("✅ 字典載入成功 (Local Import)");
+    } else {
+      setStatus('⚠️ 字典資料異常');
+    }
 
-    // 2. 載入 Tokenizer
+    // 3. 載入 Tokenizer (保持不變)
     let retryCount = 0;
     const initTokenizer = () => {
       if (window.kuromoji) {
-        console.log("✅ 檢測到 Kuromoji 腳本，開始建構...");
         window.kuromoji.builder({ 
           dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
         }).build((err, _tokenizer) => {
           if (!err && _tokenizer) {
             setTokenizer(_tokenizer);
             setResourcesReady(prev => ({ ...prev, tokenizer: true }));
-            console.log("✅ Tokenizer 建構完成");
           } else {
-            console.error("Tokenizer Build Error:", err);
-            setStatus(`❌ 分詞器建構失敗: ${err?.message || '未知錯誤'}`);
+            setStatus(`❌ 分詞器建構失敗`);
           }
         });
       } else {
         retryCount++;
-        console.log(`等待 Kuromoji 腳本中... (${retryCount}/30)`);
         if (retryCount < 30) {
           setTimeout(initTokenizer, 300);
         } else {
-          setStatus('❌ 找不到 Kuromoji 腳本，請檢查 index.html 的 script 標籤');
+          setStatus('❌ 找不到 Kuromoji 腳本');
         }
       }
     };
