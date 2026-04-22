@@ -1,9 +1,7 @@
 /* global kuromoji */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import Papa from 'papaparse';
-import dictData from './processed_dict.json';
 
-// --- 工具函式 (保持不變) ---
+// --- 工具函式 ---
 const toHiragana = (str) => {
   if (!str) return '';
   return str.replace(/[\u30a1-\u30f6]/g, (m) => String.fromCharCode(m.charCodeAt(0) - 0x60));
@@ -26,27 +24,37 @@ function App() {
   const [inputText, setInputText] = useState('');
   const [words, setWords] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
-  const [status, setStatus] = useState('🔍 正在確認資源狀態...');
+  const [status, setStatus] = useState('🔍 正在初始化...');
   const [resourcesReady, setResourcesReady] = useState({ dict: false, tokenizer: false });
   const [tokenizer, setTokenizer] = useState(null);
   const [dictionary, setDictionary] = useState(null);
   const [showResult, setShowResult] = useState(false);
 
-  // --- 初始化資源 ---
+  // --- 初始化資源 (從雲端獲取) ---
   useEffect(() => {
-    console.log("初始化開始...");
+    // 1. 從 Firebase 載入字典
+    const loadDictionary = async () => {
+      try {
+        setStatus('⏳ 正在從雲端下載字典...');
+        // 重要：請將下方的引號內容替換為你的 Firebase Download URL
+        const firebaseURL = "YOUR_FIREBASE_URL_HERE"; 
+        
+        const response = await fetch(firebaseURL);
+        if (!response.ok) throw new Error(`HTTP 錯誤: ${response.status}`);
+        
+        const data = await response.json();
+        setDictionary(data);
+        setResourcesReady(prev => ({ ...prev, dict: true }));
+        console.log("✅ 字典載入成功");
+      } catch (err) {
+        console.error(err);
+        setStatus(`⚠️ 字典載入失敗: ${err.message}`);
+      }
+    };
 
-    // 2. 字典處理：直接從 import 的資料設定，不再用 fetch
-    if (dictData) {
-      setDictionary(dictData);
-      setResourcesReady(prev => ({ ...prev, dict: true }));
-      console.log("✅ 字典載入成功 (Local Import)");
-    } else {
-      setStatus('⚠️ 字典資料異常');
-    }
+    loadDictionary();
 
-    // 3. 載入 Tokenizer (保持不變)
-    let retryCount = 0;
+    // 2. 載入 Tokenizer (使用 CDN 動態注入防止腳本遺失)
     const initTokenizer = () => {
       if (window.kuromoji) {
         window.kuromoji.builder({ 
@@ -55,19 +63,21 @@ function App() {
           if (!err && _tokenizer) {
             setTokenizer(_tokenizer);
             setResourcesReady(prev => ({ ...prev, tokenizer: true }));
+            console.log("✅ Tokenizer 就緒");
           } else {
-            setStatus(`❌ 分詞器建構失敗`);
+            setStatus('❌ 分詞器建構失敗');
           }
         });
       } else {
-        retryCount++;
-        if (retryCount < 30) {
-          setTimeout(initTokenizer, 300);
-        } else {
-          setStatus('❌ 找不到 Kuromoji 腳本');
-        }
+        // 如果 index.html 沒載入到，這裡嘗試手動插入腳本
+        const script = document.createElement('script');
+        script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
+        script.async = true;
+        script.onload = () => initTokenizer();
+        document.head.appendChild(script);
       }
     };
+    
     initTokenizer();
   }, []);
 
@@ -75,10 +85,6 @@ function App() {
   useEffect(() => {
     if (resourcesReady.dict && resourcesReady.tokenizer) {
       setStatus('✅ 系統就緒');
-    } else if (resourcesReady.dict) {
-      setStatus('⏳ 字典已 OK，正在載入分詞器...');
-    } else if (resourcesReady.tokenizer) {
-      setStatus('⏳ 分詞器已 OK，正在下載字典檔...');
     }
   }, [resourcesReady]);
 
@@ -86,13 +92,17 @@ function App() {
   const handleParse = useCallback(() => {
     if (!tokenizer || !dictionary || !inputText.trim()) return;
     try {
-      setStatus('🔍 正在解析日文結構...');
+      setStatus('🔍 正在分析歌詞...');
       const tokens = tokenizer.tokenize(inputText);
       const processed = [];
+      
       for (let i = 0; i < tokens.length; i++) {
         let current = tokens[i];
         let next = tokens[i + 1];
+        
+        // 處理サ變動詞 (例如：勉強 + する)
         const isSaven = current.pos === '名詞' && next && (next.pos === '動詞' || next.pos === '助動詞') && /^[さしすせそじずぜぞ]/.test(next.surface_form);
+        
         if (isSaven) {
           let surface = current.surface_form;
           while (tokens[i + 1] && (['動詞', '助動詞'].includes(tokens[i + 1].pos) || tokens[i+1].pos_detail_1 === '接尾')) {
@@ -110,41 +120,47 @@ function App() {
         }
       }
 
+      // 過濾重要詞性
       const filtered = processed.filter(t => ['名詞', '動詞', '形容詞', '副詞', '連體詞', 'サ變動詞'].includes(t.pos));
+      
+      // 結合字典資料
       const finalized = [];
       for (let i = 0; i < filtered.length; i++) {
         const cur = filtered[i];
         const nxt = filtered[i + 1];
         const combinedStr = nxt ? cur.surface + nxt.surface : null;
+        
         if (combinedStr && dictionary[combinedStr]) {
           const entry = dictionary[combinedStr];
           finalized.push({ surface: combinedStr, base: combinedStr, reading: entry.r ? toHiragana(entry.r) : (cur.reading + nxt.reading), english: extractMeaning(entry.m), pos: '複合詞', id: i });
           i++;
         } else {
           const entry = dictionary[cur.base] || dictionary[cur.surface];
-          finalized.push({ ...cur, reading: (entry && entry.r) ? toHiragana(entry.r) : cur.reading, english: extractMeaning(entry?.m), verbType: entry?.t || (entry?.p?.includes('vi') ? '自動詞' : entry?.p?.includes('vt') ? '他動詞' : ''), id: i });
+          finalized.push({ ...cur, reading: (entry && entry.r) ? toHiragana(entry.r) : cur.reading, english: extractMeaning(entry?.m), id: i });
         }
       }
 
       const uniqueMap = new Map();
       finalized.forEach(f => { if (!uniqueMap.has(f.base)) uniqueMap.set(f.base, f); });
       const uniqueList = Array.from(uniqueMap.values());
+      
       setWords(uniqueList);
       setSelectedIds(new Set(uniqueList.map(w => w.id)));
       setShowResult(true);
       setStatus('✅ 解析完成');
     } catch (e) {
       console.error(e);
-      setStatus('❌ 解析過程出錯');
+      setStatus('❌ 解析出錯');
     }
   }, [tokenizer, dictionary, inputText]);
 
-  // --- 高亮渲染與樣式 ---
+  // --- 高亮顯示 ---
   const highlightedLyrics = useMemo(() => {
     if (!showResult || !inputText) return null;
     const activeWords = words.filter(w => selectedIds.has(w.id));
-    if (activeWords.length === 0) return inputText;
     const sortedSurfaces = activeWords.map(w => w.surface).sort((a, b) => b.length - a.length);
+    if (sortedSurfaces.length === 0) return inputText;
+
     const regex = new RegExp(`(${sortedSurfaces.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
     return inputText.split(regex).map((part, i) => {
       const info = activeWords.find(w => w.surface === part);
@@ -161,26 +177,24 @@ function App() {
     <div className="container">
       <style>{`
         :root { --muji-text: #55606b; --muji-border: #d1d9e0; --accent-blue: #94a3b8; }
-        body { background-color: #f1f5f9; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        .container { padding: 40px 20px; max-width: 900px; margin: 0 auto; min-height: 100vh; }
-        .status-tag { text-align: center; font-size: 12px; color: var(--accent-blue); font-weight: bold; margin-bottom: 12px; }
-        h1 { text-align: center; font-weight: 300; letter-spacing: 6px; margin-bottom: 40px; color: var(--muji-text); }
+        body { background-color: #f1f5f9; margin: 0; font-family: sans-serif; color: var(--muji-text); }
+        .container { padding: 40px 20px; max-width: 900px; margin: 0 auto; }
+        .status-tag { text-align: center; font-size: 12px; color: var(--accent-blue); margin-bottom: 12px; font-weight: bold; }
+        h1 { text-align: center; font-weight: 300; letter-spacing: 4px; margin-bottom: 40px; }
         h1 span { font-weight: 600; color: var(--accent-blue); }
-        textarea { width: 100%; height: 280px; padding: 25px; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 18px; resize: none; box-sizing: border-box; outline: none; transition: 0.3s; line-height: 1.6; }
-        textarea:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.1); }
-        .btn-main { width: 100%; padding: 18px; margin-top: 24px; background: var(--muji-text); color: white; border: none; border-radius: 12px; cursor: pointer; font-size: 16px; font-weight: 500; transition: 0.3s; }
+        textarea { width: 100%; height: 280px; padding: 20px; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 18px; outline: none; }
+        .btn-main { width: 100%; padding: 18px; margin-top: 20px; background: var(--muji-text); color: white; border: none; border-radius: 12px; cursor: pointer; font-size: 16px; }
         .btn-main:disabled { background: #cbd5e1; cursor: not-allowed; }
-        .lyrics-box { white-space: pre-wrap; line-height: 2.5; padding: 35px; background: white; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-        .highlighted-word { border-bottom: 2px solid var(--accent-blue); position: relative; cursor: help; padding: 0 2px; }
-        .tooltip { visibility: hidden; position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); background: #334155; color: white; padding: 8px 14px; border-radius: 6px; font-size: 13px; z-index: 100; white-space: nowrap; opacity: 0; transition: 0.2s; }
+        .lyrics-box { white-space: pre-wrap; line-height: 2.5; padding: 30px; background: white; border-radius: 12px; border: 1px solid var(--muji-border); font-size: 20px; }
+        .highlighted-word { border-bottom: 2px solid var(--accent-blue); position: relative; cursor: help; }
+        .tooltip { visibility: hidden; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); background: #334155; color: white; padding: 6px 12px; border-radius: 6px; font-size: 12px; white-space: nowrap; opacity: 0; transition: 0.2s; z-index: 10; }
         .highlighted-word:hover .tooltip { visibility: visible; opacity: 1; }
-        .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin-top: 40px; }
-        .card { padding: 20px; background: white; border: 1px solid var(--muji-border); border-radius: 12px; cursor: pointer; transition: 0.2s; }
-        .card.selected { border-left: 6px solid var(--accent-blue); background: #f8fafc; }
-        .card strong { display: block; font-size: 1.1rem; color: #1e293b; }
+        .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin-top: 30px; }
+        .card { padding: 16px; background: white; border: 1px solid var(--muji-border); border-radius: 10px; cursor: pointer; }
+        .card.selected { border-left: 5px solid var(--accent-blue); background: #f8fafc; }
       `}</style>
 
-      <div className="status-tag">STATUS: {status}</div>
+      <div className="status-tag">{status}</div>
       <h1>LANGLAB <span>PRO</span></h1>
 
       {!showResult ? (
@@ -188,20 +202,19 @@ function App() {
           <textarea 
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="請輸入日文歌詞..."
-            disabled={!resourcesReady.tokenizer || !resourcesReady.dict}
+            placeholder="在此貼上日文歌詞，開始製作 Anki 卡片..."
           />
           <button 
             className="btn-main" 
             onClick={handleParse}
             disabled={!resourcesReady.tokenizer || !resourcesReady.dict || !inputText.trim()}
           >
-            {resourcesReady.tokenizer && resourcesReady.dict ? '開始解析' : '正在準備資源...'}
+            {resourcesReady.tokenizer && resourcesReady.dict ? '開始解析歌詞' : '正在準備資源...'}
           </button>
         </div>
       ) : (
         <div>
-          <button onClick={() => setShowResult(false)} style={{ marginBottom: '20px', padding: '8px 12px', cursor: 'pointer' }}>← 返回</button>
+          <button onClick={() => setShowResult(false)} style={{ marginBottom: '20px', padding: '10px 15px', borderRadius: '8px', border: '1px solid #ccc', cursor: 'pointer' }}>← 返回輸入</button>
           <div className="lyrics-box">{highlightedLyrics}</div>
           <div className="card-grid">
             {words.map(w => (
@@ -210,9 +223,9 @@ function App() {
                 n.has(w.id) ? n.delete(w.id) : n.add(w.id);
                 setSelectedIds(n);
               }}>
-                <strong>{w.base}</strong>
-                <div style={{ color: 'var(--accent-blue)', fontSize: '14px' }}>{w.reading}</div>
-                <div style={{ marginTop: '8px', fontSize: '13px', color: '#475569' }}>{w.english}</div>
+                <strong style={{ fontSize: '1.1rem' }}>{w.base}</strong>
+                <div style={{ color: '#64748b', fontSize: '14px' }}>{w.reading}</div>
+                <div style={{ marginTop: '5px', fontSize: '13px' }}>{w.english}</div>
               </div>
             ))}
           </div>
