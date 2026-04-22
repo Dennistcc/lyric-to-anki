@@ -30,31 +30,40 @@ function App() {
   const [dictionary, setDictionary] = useState(null);
   const [showResult, setShowResult] = useState(false);
 
-  // --- 初始化資源 (從雲端獲取) ---
+// --- 初始化資源 ---
   useEffect(() => {
     const loadDictionary = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 40MB 較大，給 60 秒時間
+
       try {
         setStatus('⏳ 正在連接雲端伺服器...');
-        // 請確保此處為帶有 token 的完整長連結
-        const firebaseURL = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8"; 
+        const firebaseURL = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8";
         
-        const response = await fetch(firebaseURL);
-        if (!response.ok) throw new Error(`HTTP 錯誤: ${response.status}`);
+        const response = await fetch(firebaseURL, {
+          method: 'GET',
+          mode: 'cors',
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json' }
+        });
 
-        setStatus('⏳ 檔案下載中 (40MB 可能需要較長時間)...');
-        console.log("📡 已連線，開始下載 JSON...");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-        const data = await response.json();
+        clearTimeout(timeoutId);
+        setStatus('⏳ 檔案下載中 (40MB)...');
         
-        console.log("✅ 下載完成，開始解析物件結構...");
-        setStatus('⏳ 正在優化字典結構...');
-
+        const textData = await response.text();
+        setStatus('⏳ 正在解析字典結構...');
+        
+        const data = JSON.parse(textData);
         setDictionary(data);
         setResourcesReady(prev => ({ ...prev, dict: true }));
-        console.log("🎉 字典就緒，詞條總數：", Object.keys(data).length);
+        console.log("✅ 字典載入成功");
+
       } catch (err) {
-        console.error("🔥 載入失敗：", err);
-        setStatus(`⚠️ 字典載入失敗: ${err.message}`);
+        clearTimeout(timeoutId);
+        console.error("🔥 載入失敗:", err);
+        setStatus(`⚠️ 載入失敗: ${err.name === 'AbortError' ? '連線超時' : err.message}`);
       }
     };
 
@@ -71,7 +80,7 @@ function App() {
           }
         });
       } else {
-        // 動態注入腳本防止丟失
+        // 如果找不到腳本，嘗試動態加載
         const script = document.createElement('script');
         script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
         script.async = true;
@@ -82,7 +91,7 @@ function App() {
 
     loadDictionary();
     initTokenizer();
-  }, []);
+  }, []); // 這是第 116 行，確保這裡只有一個 }, []);
 
   useEffect(() => {
     if (resourcesReady.dict && resourcesReady.tokenizer) {
