@@ -37,7 +37,7 @@ function App() {
       try {
         setStatus('⏳ 正在從雲端下載字典...');
         // 重要：請將下方的引號內容替換為你的 Firebase Download URL
-        const firebaseURL = "YOUR_FIREBASE_URL_HERE"; 
+        const firebaseURL = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8"; 
         
         const response = await fetch(firebaseURL);
         if (!response.ok) throw new Error(`HTTP 錯誤: ${response.status}`);
