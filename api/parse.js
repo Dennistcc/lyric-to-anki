@@ -1,8 +1,7 @@
 import admin from 'firebase-admin';
-import kuromoji from 'kuromoji';
 import path from 'path';
 
-// 1. Firebase 初始化
+// 1. Firebase 初始化 (保持不變)
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   if (serviceAccount.private_key) serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
@@ -10,11 +9,40 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// 2. Kuromoji 初始化器
-const getTokenizer = () => new Promise((resolve, reject) => {
-  kuromoji.builder({ dicPath: path.join(process.cwd(), "node_modules/kuromoji/dict") })
-    .build((err, t) => err ? reject(err) : resolve(t));
-});
+// --- 核心 A：剝洋蔥規則表 (De-inflection Rules) ---
+const DEINFLECT_RULES = [
+  { from: "させられた", to: "る" }, { from: "された", to: "する" },
+  { from: "ました", to: "る" }, { from: "ます", to: "る" },
+  { from: "ない", to: "る" }, { from: "れば", to: "る" },
+  { from: "られる", to: "る" }, { from: "させる", to: "る" },
+  { from: "った", to: "う" }, { from: "いた", to: "く" },
+  { from: "いだ", to: "ぐ" }, { from: "した", to: "す" },
+  { from: "った", to: "つ" }, { from: "んだ", to: "ぬ" },
+  { from: "んだ", to: "ぶ" }, { from: "んだ", to: "む" },
+  { from: "った", to: "る" }, { from: "って", to: "う" },
+  { from: "いて", to: "く" }, { from: "いで", to: "ぐ" },
+  { from: "して", to: "す" }, { from: "んで", to: "む" },
+  { from: "て", to: "る" }, { from: "た", to: "る" }
+];
+
+const A_TO_U = { 'わ': 'う', 'か': 'く', 'g': 'ぐ', 'さ': 'す', 'た': 'つ', 'な': 'ぬ', 'ば': 'ぶ', 'ま': 'む', 'ら': 'る' };
+
+// --- 核心 B：還原函數 ---
+function getBaseCandidates(surface) {
+  const candidates = new Set([surface]);
+  // 1. 規則還原
+  DEINFLECT_RULES.forEach(rule => {
+    if (surface.endsWith(rule.from)) {
+      candidates.add(surface.slice(0, -rule.from.length) + rule.to);
+    }
+  });
+  // 2. 五段否定還原 (飲ま-ない -> 飲む)
+  if (surface.endsWith('ない') && surface.length >= 3) {
+    const stem = surface.slice(-3, -2);
+    if (A_TO_U[stem]) candidates.add(surface.slice(0, -3) + A_TO_U[stem]);
+  }
+  return Array.from(candidates);
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
@@ -22,112 +50,63 @@ export default async function handler(req, res) {
   if (!text) return res.json({ success: true, words: [] });
 
   try {
-    const tokenizer = await getTokenizer();
-    const tokens = tokenizer.tokenize(text);
-    
-    // --- 第一階段：長詞匹配 ---
-    
-    // 生成所有長度 2~5 的組合來查字典
-    const candidates = [];
-    for (let len = 5; len >= 2; len--) {
-      for (let i = 0; i <= text.length - len; i++) {
-        candidates.push(text.substring(i, i + len));
-      }
-    }
-
-    const uniqueCandidates = [...new Set(candidates)];
-    const foundDict = {};
-    const chunks = [];
-    for (let i = 0; i < uniqueCandidates.length; i += 30) chunks.push(uniqueCandidates.slice(i, i + 30));
-    
-    // 批次查詢長詞
-    for (const chunk of chunks) {
-      const snap = await db.collection('dictionary').where('word', 'in', chunk).get();
-      snap.forEach(doc => {
-        const d = doc.data();
-        foundDict[d.word] = d;
-      });
-    }
-
     const occupied = new Array(text.length).fill(false);
     const finalResults = [];
 
-    // 最長匹配優先 (Longest Matching)
-    const sortedLongWords = Object.keys(foundDict).sort((a, b) => b.length - a.length);
-    
-    for (const word of sortedLongWords) {
-      let pos = text.indexOf(word);
-      while (pos !== -1) {
-        const isFree = occupied.slice(pos, pos + word.length).every(v => v === false);
-        if (isFree) {
-          const data = foundDict[word];
-          finalResults.push({
-            id: Math.random().toString(36).substr(2, 9),
-            surface: word,
-            base: word,
-            reading: data.reading || '',
-            pos: data.pos || '名詞', 
-            meaning: data.meaning || '',
-            index: pos
-          });
-          for (let k = 0; k < word.length; k++) occupied[pos + k] = true;
-        }
-        pos = text.indexOf(word, pos + 1);
+    // --- 階段 1：地毯式字典掃描 (Longest Matching) ---
+    // 生成所有長度 2-7 的候選片段
+    const fragments = [];
+    for (let len = 7; len >= 2; len--) {
+      for (let i = 0; i <= text.length - len; i++) {
+        fragments.push({ text: text.substring(i, i + len), index: i });
       }
     }
 
-    // --- 第二階段：Kuromoji 補位 ---
-
-    const missingBases = [];
-
-    tokens.forEach(t => {
-      const startIdx = t.word_position - 1;
-      const base = t.basic_form === '*' ? t.surface_form : t.basic_form;
-      
-      // 只有當該位置完全沒被長詞佔用時，才處理短詞
-      const isPartiallyOccupied = occupied.slice(startIdx, startIdx + t.surface_form.length).some(v => v === true);
-      
-      if (!isPartiallyOccupied) {
-        const noise = ['する', 'なる', 'いる', 'ある', 'れる', 'られる', 'せる', 'させる', 'ない', 'だ', 'た', 'の'];
-        if (['名詞', '動詞', '形容詞', '副詞'].includes(t.pos) && !noise.includes(base)) {
-          // 過濾掉非漢字的單個假名 (例如 'に', 'を')
-          if (base.length > 1 || /[\u4e00-\u9faf]/.test(base)) {
-            finalResults.push({
-              id: Math.random().toString(36).substr(2, 9),
-              surface: t.surface_form,
-              base: base,
-              reading: t.reading,
-              pos: t.pos,
-              meaning: '', // 暫時空白，下一階段補齊
-              index: startIdx
-            });
-            missingBases.push(base);
-          }
-        }
-      }
+    // 收集所有需要查字典的詞（包含還原後的候選詞）
+    let allQueryWords = new Set();
+    fragments.forEach(f => {
+      getBaseCandidates(f.text).forEach(c => allQueryWords.add(c));
     });
 
-    // --- 第三階段：二次查表 (補齊短詞的解釋) ---
-
-    if (missingBases.length > 0) {
-      const uniqueMissing = [...new Set(missingBases)];
-      const missingSnap = await db.collection('dictionary').where('word', 'in', uniqueMissing.slice(0, 30)).get();
-      const missingDataMap = {};
-      missingSnap.forEach(doc => {
-        const d = doc.data();
-        missingDataMap[d.word] = d;
-      });
-
-      finalResults.forEach(item => {
-        if (item.meaning === '' && missingDataMap[item.base]) {
-          item.meaning = missingDataMap[item.base].meaning;
-          if (!item.reading) item.reading = missingDataMap[item.base].reading;
-        }
-      });
+    // 批次查詢 Firestore (每次 30 個)
+    const wordList = Array.from(allQueryWords);
+    const foundMap = {};
+    for (let i = 0; i < wordList.length; i += 30) {
+      const chunk = wordList.slice(i, i + 30);
+      const snap = await db.collection('dictionary').where('word', 'in', chunk).get();
+      snap.forEach(doc => { foundMap[doc.data().word] = doc.data(); });
     }
 
-    // --- 第四階段：最終排序與去重 ---
+    // --- 階段 2：座標佔位邏輯 ---
+    // 按長度優先排序片段
+    const sortedFragments = fragments.sort((a, b) => b.text.length - a.text.length);
 
+    for (const f of sortedFragments) {
+      // 檢查該片段是否已被佔用
+      const isOccupied = occupied.slice(f.index, f.index + f.text.length).some(v => v === true);
+      if (isOccupied) continue;
+
+      // 檢查該片段或其還原形式是否在字典中
+      const candidates = getBaseCandidates(f.text);
+      const hitBase = candidates.find(c => foundMap[c]);
+
+      if (hitBase) {
+        const dictData = foundMap[hitBase];
+        finalResults.push({
+          id: Math.random().toString(36).substr(2, 9),
+          surface: f.text,
+          base: hitBase,
+          reading: dictData.reading || '',
+          meaning: dictData.meaning || '',
+          pos: dictData.pos || '名詞',
+          index: f.index
+        });
+        // 標記座標
+        for (let k = 0; k < f.text.length; k++) occupied[f.index + k] = true;
+      }
+    }
+
+    // --- 階段 3：排序與去重 ---
     const seenBase = new Set();
     const sorted = finalResults
       .sort((a, b) => a.index - b.index)
@@ -140,7 +119,7 @@ export default async function handler(req, res) {
     res.status(200).json({ success: true, words: sorted });
 
   } catch (e) {
-    console.error(e);
+    console.error("Parse Error:", e);
     res.status(500).json({ success: false, error: e.message });
   }
 }
