@@ -1,7 +1,7 @@
 /* global kuromoji */
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
-// --- 工具函式 ---
+// --- 工具函式 (保持不變) ---
 const toHiragana = (str) => {
   if (!str) return '';
   return str.replace(/[\u30a1-\u30f6]/g, (m) => String.fromCharCode(m.charCodeAt(0) - 0x60));
@@ -21,6 +21,16 @@ const extractMeaning = (m) => {
 };
 
 function App() {
+  // --- 1. 全域錯誤監聽 (放在最前面) ---
+  useEffect(() => {
+    const handleError = (message, source, lineno) => {
+      alert(`🚨 偵測到錯誤: ${message}\n來源: ${source}:${lineno}`);
+    };
+    window.onerror = handleError;
+    return () => { window.onerror = null; };
+  }, []);
+
+  // --- 2. 狀態定義 ---
   const [inputText, setInputText] = useState('');
   const [words, setWords] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -30,40 +40,26 @@ function App() {
   const [dictionary, setDictionary] = useState(null);
   const [showResult, setShowResult] = useState(false);
 
-// --- 初始化資源 ---
+  // --- 3. 初始化資源 ---
   useEffect(() => {
     const loadDictionary = async () => {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 40MB 較大，給 60 秒時間
-
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
       try {
         setStatus('⏳ 正在連接雲端伺服器...');
         const firebaseURL = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8";
-        
-        const response = await fetch(firebaseURL, {
-          method: 'GET',
-          mode: 'cors',
-          signal: controller.signal,
-          headers: { 'Accept': 'application/json' }
-        });
-
+        const response = await fetch(firebaseURL, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
         clearTimeout(timeoutId);
         setStatus('⏳ 檔案下載中 (40MB)...');
-        
         const textData = await response.text();
         setStatus('⏳ 正在解析字典結構...');
-        
         const data = JSON.parse(textData);
         setDictionary(data);
         setResourcesReady(prev => ({ ...prev, dict: true }));
-        console.log("✅ 字典載入成功");
-
       } catch (err) {
         clearTimeout(timeoutId);
-        console.error("🔥 載入失敗:", err);
-        setStatus(`⚠️ 載入失敗: ${err.name === 'AbortError' ? '連線超時' : err.message}`);
+        setStatus(`⚠️ 載入失敗: ${err.message}`);
       }
     };
 
@@ -80,7 +76,6 @@ function App() {
           }
         });
       } else {
-        // 如果找不到腳本，嘗試動態加載
         const script = document.createElement('script');
         script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
         script.async = true;
@@ -91,7 +86,7 @@ function App() {
 
     loadDictionary();
     initTokenizer();
-  }, []); // 這是第 116 行，確保這裡只有一個 }, []);
+  }, []);
 
   useEffect(() => {
     if (resourcesReady.dict && resourcesReady.tokenizer) {
@@ -99,7 +94,7 @@ function App() {
     }
   }, [resourcesReady]);
 
-  // --- 解析邏輯 ---
+  // --- 4. 解析邏輯 ---
   const handleParse = useCallback(() => {
     if (!tokenizer || !dictionary || !inputText.trim()) return;
     try {
@@ -135,7 +130,6 @@ function App() {
         const cur = filtered[i];
         const nxt = filtered[i + 1];
         const combinedStr = nxt ? cur.surface + nxt.surface : null;
-        
         if (combinedStr && dictionary[combinedStr]) {
           const entry = dictionary[combinedStr];
           finalized.push({ surface: combinedStr, base: combinedStr, reading: entry.r ? toHiragana(entry.r) : (cur.reading + nxt.reading), english: extractMeaning(entry.m), pos: '複合詞', id: i });
@@ -149,23 +143,20 @@ function App() {
       const uniqueMap = new Map();
       finalized.forEach(f => { if (!uniqueMap.has(f.base)) uniqueMap.set(f.base, f); });
       const uniqueList = Array.from(uniqueMap.values());
-      
       setWords(uniqueList);
       setSelectedIds(new Set(uniqueList.map(w => w.id)));
       setShowResult(true);
       setStatus('✅ 解析完成');
     } catch (e) {
-      console.error(e);
       setStatus('❌ 解析過程出錯');
     }
   }, [tokenizer, dictionary, inputText]);
 
-  // --- 高亮渲染 ---
+  // --- 5. 高亮渲染 ---
   const highlightedLyrics = useMemo(() => {
     if (!showResult || !inputText) return null;
     const activeWords = words.filter(w => selectedIds.has(w.id));
     if (activeWords.length === 0) return inputText;
-    
     const sortedSurfaces = activeWords.map(w => w.surface).sort((a, b) => b.length - a.length);
     const regex = new RegExp(`(${sortedSurfaces.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
     
@@ -180,8 +171,10 @@ function App() {
     });
   }, [showResult, inputText, words, selectedIds]);
 
+  // --- 6. 畫面渲染 ---
   return (
     <div className="container">
+      <div style={{ fontSize: '10px', color: '#ccc', textAlign: 'center' }}>Debug: v1.0.1</div>
       <style>{`
         :root { --muji-text: #55606b; --muji-border: #d1d9e0; --accent-blue: #94a3b8; }
         body { background-color: #f1f5f9; margin: 0; font-family: -apple-system, sans-serif; color: var(--muji-text); }
