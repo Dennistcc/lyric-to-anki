@@ -1,70 +1,60 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const App = () => {
   const [inputText, setInputText] = useState('');
   const [words, setWords] = useState([]);
-  const [dictionary, setDictionary] = useState(null);
-  const [tokenizer, setTokenizer] = useState(null);
-  const [isReady, setIsReady] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState('Ready');
 
-  useEffect(() => {
-    const loadResources = async () => {
-      try {
-        const initTokenizer = () => new Promise((resolve) => {
-          if (window.kuromoji) {
-            window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => resolve(_t));
-          } else {
-            const script = document.createElement('script');
-            script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
-            script.onload = () => window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => resolve(_t));
-            document.body.appendChild(script);
-          }
-        });
-        const loadDict = async () => {
-          const url = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8";
-          const res = await fetch(url);
-          return await res.json();
-        };
-        const [t, d] = await Promise.all([initTokenizer(), loadDict()]);
-        setTokenizer(t);
-        setDictionary(d);
-        setIsReady(true);
-      } catch (err) { console.error("Resource load error:", err); }
-    };
-    loadResources();
-  }, []);
+  const handleParse = async () => {
+    if (!inputText.trim()) return;
+    setLoading(true);
+    setStatus('Parsing...');
+    setWords([]);
 
-  const handleParse = useCallback(() => {
-    if (!tokenizer || !dictionary || !inputText.trim()) return;
-    const tokens = tokenizer.tokenize(inputText);
-    const results = [];
-    tokens.forEach(t => {
-      if (['名詞', '動詞', '形容詞'].includes(t.pos)) {
-        const base = t.basic_form === '*' ? t.surface_form : t.basic_form;
-        const entry = dictionary[base] || dictionary[t.surface_form];
-        if (entry) results.push({ word: base, reading: entry.r || '', meaning: entry.m || '' });
+    try {
+      const response = await fetch('/api/parse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: inputText }),
+      });
+      const data = await response.json();
+      
+      if (data.success) {
+        // 自動適應不同的欄位名稱並去重
+        const formattedWords = (data.words || []).map(item => ({
+          word: item.word || item.base || item.kanji || '',
+          reading: item.reading || item.r || '',
+          meaning: item.meaning || item.m || ''
+        }));
+        
+        setWords(formattedWords);
+        setStatus(formattedWords.length > 0 ? 'Completed' : 'No matches found');
       }
-    });
-    const unique = Array.from(new Map(results.map(item => [item.word, item])).values());
-    setWords(unique);
-  }, [tokenizer, dictionary, inputText]);
+    } catch (error) {
+      console.error("Error:", error);
+      setStatus('Error');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div style={styles.container}>
       <main style={styles.main}>
         <textarea
           style={styles.textarea}
-          placeholder={isReady ? "貼上歌詞..." : "系統準備中..."}
+          placeholder="貼上歌詞..."
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
         />
         
         <button 
-          style={{...styles.button, opacity: (!isReady || !inputText.trim()) ? 0.3 : 1}} 
+          style={{...styles.button, opacity: loading ? 0.3 : 1}} 
           onClick={handleParse} 
-          disabled={!isReady}
+          disabled={loading}
         >
-          {isReady ? '解析' : '...'}
+          {loading ? '...' : '解析'}
         </button>
 
         <div style={styles.resultList}>
