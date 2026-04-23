@@ -17,29 +17,29 @@ const App = () => {
 
   // 1. 初始化 Kuromoji 分詞器
   useEffect(() => {
-    const initTokenizer = () => {
-      if (window.kuromoji) {
-        window.kuromoji.builder({ 
-  dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict" // 結尾不要加斜槓試試看
-}).build((err, _tokenizer) => { ... });
-          if (err) {
-            console.error("Tokenizer Error:", err);
-            setStatus('❌ 分詞器載入失敗');
-          } else {
-            setTokenizer(_tokenizer);
-            setStatus('✅ 系統就緒');
-          }
-        });
-      } else {
-        const script = document.createElement('script');
-        script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
-        script.async = true;
-        script.onload = initTokenizer;
-        document.body.appendChild(script);
-      }
-    };
-    initTokenizer();
-  }, []);
+  const initTokenizer = () => {
+    if (window.kuromoji) {
+      window.kuromoji.builder({ 
+        dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" 
+      }).build((err, _tokenizer) => {
+        if (err) {
+          console.error("Tokenizer Error:", err);
+          setStatus('❌ 分詞器載入失敗');
+        } else {
+          setTokenizer(_tokenizer);
+          setStatus('✅ 系統就緒');
+        }
+      });
+    } else {
+      const script = document.createElement('script');
+      script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
+      script.async = true;
+      script.onload = initTokenizer;
+      document.body.appendChild(script);
+    }
+  };
+  initTokenizer();
+}, []);
 
   // 2. 解析邏輯 (結合 Kuromoji 與 Firestore API)
   const handleParse = useCallback(async () => {
