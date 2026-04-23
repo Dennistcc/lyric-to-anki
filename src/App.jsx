@@ -5,104 +5,66 @@ const App = () => {
   const [words, setWords] = useState([]);
   const [dictionary, setDictionary] = useState(null);
   const [tokenizer, setTokenizer] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState('⏳ 正在載入系統資源 (40MB)...');
+  const [isReady, setIsReady] = useState(false);
 
-  // --- 初始化：下載字典與啟動分詞器 ---
   useEffect(() => {
     const loadResources = async () => {
       try {
-        // 1. 載入 Kuromoji
-        const initTokenizer = () => {
-          return new Promise((resolve) => {
-            if (window.kuromoji) {
-              window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => {
-                resolve(_t);
-              });
-            } else {
-              const script = document.createElement('script');
-              script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
-              script.onload = () => {
-                window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => {
-                  resolve(_t);
-                });
-              };
-              document.body.appendChild(script);
-            }
-          });
-        };
-
-        // 2. 載入 40MB 字典 (從你的 Firebase Storage)
+        const initTokenizer = () => new Promise((resolve) => {
+          if (window.kuromoji) {
+            window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => resolve(_t));
+          } else {
+            const script = document.createElement('script');
+            script.src = "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/build/kuromoji.js";
+            script.onload = () => window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _t) => resolve(_t));
+            document.body.appendChild(script);
+          }
+        });
         const loadDict = async () => {
           const url = "https://firebasestorage.googleapis.com/v0/b/lyric-to-anki.firebasestorage.app/o/processed_dict.json?alt=media&token=d989a236-bb03-4681-a1f0-64212fd3afb8";
           const res = await fetch(url);
           return await res.json();
         };
-
         const [t, d] = await Promise.all([initTokenizer(), loadDict()]);
         setTokenizer(t);
         setDictionary(d);
-        setLoading(false);
-        setStatus('Ready');
-      } catch (err) {
-        console.error(err);
-        setStatus('⚠️ 載入失敗，請重新整理');
-      }
+        setIsReady(true);
+      } catch (err) { console.error("Resource load error:", err); }
     };
     loadResources();
   }, []);
 
-  // --- 解析邏輯 (昨天的強大版本) ---
   const handleParse = useCallback(() => {
     if (!tokenizer || !dictionary || !inputText.trim()) return;
-    
-    setStatus('Parsing...');
     const tokens = tokenizer.tokenize(inputText);
     const results = [];
-
     tokens.forEach(t => {
-      // 只要名詞、動詞、形容詞
-      if (['名詞', '動詞', '形容詞', '副詞'].includes(t.pos)) {
+      if (['名詞', '動詞', '形容詞'].includes(t.pos)) {
         const base = t.basic_form === '*' ? t.surface_form : t.basic_form;
         const entry = dictionary[base] || dictionary[t.surface_form];
-        
-        if (entry) {
-          results.push({
-            word: base,
-            reading: entry.r || '',
-            meaning: entry.m || ''
-          });
-        }
+        if (entry) results.push({ word: base, reading: entry.r || '', meaning: entry.m || '' });
       }
     });
-
-    // 去重
     const unique = Array.from(new Map(results.map(item => [item.word, item])).values());
     setWords(unique);
-    setStatus('Completed');
   }, [tokenizer, dictionary, inputText]);
 
   return (
     <div style={styles.container}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>LANGLAB PRO <span>(Classic)</span></h1>
-        <p style={styles.status}>{status}</p>
-      </header>
-
       <main style={styles.main}>
         <textarea
           style={styles.textarea}
-          placeholder="貼上歌詞 (資源載入後可用)..."
+          placeholder={isReady ? "貼上歌詞..." : "系統準備中..."}
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          disabled={loading}
         />
+        
         <button 
-          style={{...styles.button, opacity: loading ? 0.5 : 1}} 
+          style={{...styles.button, opacity: (!isReady || !inputText.trim()) ? 0.3 : 1}} 
           onClick={handleParse} 
-          disabled={loading}
+          disabled={!isReady}
         >
-          {loading ? 'LOADING...' : '歌詞解析'}
+          {isReady ? '解析' : '...'}
         </button>
 
         <div style={styles.resultList}>
@@ -122,19 +84,33 @@ const App = () => {
 };
 
 const styles = {
-  container: { maxWidth: '600px', margin: '0 auto', padding: '60px 20px', backgroundColor: '#F7F6F3', minHeight: '100vh', fontFamily: 'sans-serif', color: '#333' },
-  header: { textAlign: 'center', marginBottom: '40px' },
-  title: { fontSize: '18px', fontWeight: '300', letterSpacing: '5px', color: '#7F7F7F' },
-  status: { fontSize: '10px', color: '#BCBCBC', marginTop: '8px', textTransform: 'uppercase' },
-  main: { display: 'flex', flexDirection: 'column', gap: '20px' },
-  textarea: { width: '100%', height: '180px', padding: '15px', border: '1px solid #E5E5E5', borderRadius: '2px', backgroundColor: '#FFF', fontSize: '16px', outline: 'none', resize: 'none' },
-  button: { width: '100%', padding: '14px', backgroundColor: '#7F7F7F', color: '#FFF', border: 'none', borderRadius: '2px', cursor: 'pointer', fontSize: '14px', letterSpacing: '3px' },
-  resultList: { marginTop: '20px', borderTop: '1px solid #E5E5E5' },
-  wordRow: { padding: '20px 0', borderBottom: '1px solid #F0F0F0' },
-  wordHeader: { display: 'flex', alignItems: 'baseline', gap: '12px', marginBottom: '8px' },
-  kanji: { fontSize: '20px', fontWeight: '500' },
-  reading: { fontSize: '13px', color: '#999' },
-  meaning: { fontSize: '14px', color: '#666', lineHeight: '1.6' }
+  container: { 
+    maxWidth: '500px', 
+    margin: '0 auto', 
+    padding: '40px 25px', 
+    backgroundColor: '#F9F9F7', 
+    minHeight: '100vh', 
+    fontFamily: '"Helvetica Neue", "Hiragino Sans", sans-serif',
+    color: '#444' 
+  },
+  main: { display: 'flex', flexDirection: 'column' },
+  textarea: { 
+    width: '100%', height: '140px', padding: '10px 0', 
+    border: 'none', borderBottom: '1px solid #E0E0E0', 
+    backgroundColor: 'transparent', fontSize: '16px', 
+    outline: 'none', resize: 'none', lineHeight: '1.8' 
+  },
+  button: { 
+    alignSelf: 'flex-end', marginTop: '15px', padding: '8px 25px',
+    backgroundColor: 'transparent', color: '#888', border: '1px solid #CCC',
+    borderRadius: '2px', cursor: 'pointer', fontSize: '13px', letterSpacing: '2px'
+  },
+  resultList: { marginTop: '50px' },
+  wordRow: { padding: '20px 0', borderBottom: '0.5px solid #EFEFEF' },
+  wordHeader: { display: 'flex', alignItems: 'baseline', gap: '10px' },
+  kanji: { fontSize: '19px', fontWeight: '400' },
+  reading: { fontSize: '12px', color: '#AAA' },
+  meaning: { fontSize: '14px', color: '#777', marginTop: '6px', lineHeight: '1.6' }
 };
 
 export default App;
