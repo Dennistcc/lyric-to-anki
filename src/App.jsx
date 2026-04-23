@@ -1,17 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 
-const App = () => {
+function App() {
   const [inputText, setInputText] = useState('');
   const [words, setWords] = useState([]);
+  const [selectedIds, setSelectedIds] = useState(new Set());
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState('Ready');
+  const [showResult, setShowResult] = useState(false);
 
   const handleParse = async () => {
     if (!inputText.trim()) return;
     setLoading(true);
-    setStatus('Parsing...');
-    setWords([]);
-
     try {
       const response = await fetch('/api/parse', {
         method: 'POST',
@@ -19,88 +17,82 @@ const App = () => {
         body: JSON.stringify({ text: inputText }),
       });
       const data = await response.json();
-      
       if (data.success) {
-        // 自動適應不同的欄位名稱並去重
-        const formattedWords = (data.words || []).map(item => ({
-          word: item.word || item.base || item.kanji || '',
-          reading: item.reading || item.r || '',
-          meaning: item.meaning || item.m || ''
-        }));
-        
-        setWords(formattedWords);
-        setStatus(formattedWords.length > 0 ? 'Completed' : 'No matches found');
+        setWords(data.words);
+        setSelectedIds(new Set(data.words.map(w => w.id)));
+        setShowResult(true);
       }
-    } catch (error) {
-      console.error("Error:", error);
-      setStatus('Error');
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { alert("解析失敗"); }
+    finally { setLoading(false); }
   };
 
-  return (
-    <div style={styles.container}>
-      <main style={styles.main}>
-        <textarea
-          style={styles.textarea}
-          placeholder="貼上歌詞..."
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-        />
-        
-        <button 
-          style={{...styles.button, opacity: loading ? 0.3 : 1}} 
-          onClick={handleParse} 
-          disabled={loading}
-        >
-          {loading ? '...' : '解析'}
-        </button>
+  const highlightedLyrics = useMemo(() => {
+    if (!showResult || !inputText) return null;
+    const activeWords = words.filter(w => selectedIds.has(w.id));
+    const sortedSurfaces = activeWords.map(w => w.surface).sort((a, b) => b.length - a.length);
+    if (sortedSurfaces.length === 0) return inputText;
+    
+    const regex = new RegExp(`(${sortedSurfaces.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
+    return inputText.split(regex).map((part, i) => {
+      const info = activeWords.find(w => w.surface === part);
+      return info ? (
+        <span key={i} className="hl">
+          {part}
+          <span className="tt">{info.reading} · {info.base}</span>
+        </span>
+      ) : part;
+    });
+  }, [showResult, inputText, words, selectedIds]);
 
-        <div style={styles.resultList}>
-          {words.map((item, index) => (
-            <div key={index} style={styles.wordRow}>
-              <div style={styles.wordHeader}>
-                <span style={styles.kanji}>{item.word}</span>
-                <span style={styles.reading}>{item.reading}</span>
+  return (
+    <div className="container">
+      <style>{`
+        body { background: #f9f9f7; color: #444; font-family: sans-serif; padding: 40px 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { text-align: center; font-weight: 300; letter-spacing: 4px; margin-bottom: 40px; }
+        textarea { width: 100%; height: 200px; padding: 20px; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 18px; outline: none; box-sizing: border-box; }
+        .btn { width: 100%; padding: 15px; background: #555; color: white; border: none; border-radius: 4px; margin-top: 20px; cursor: pointer; }
+        .lyrics-box { background: white; padding: 30px; border-radius: 4px; line-height: 2.2; font-size: 20px; white-space: pre-wrap; border: 1px solid #eee; }
+        .hl { border-bottom: 2px solid #8c92ac; position: relative; cursor: help; }
+        .tt { visibility: hidden; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 5px 10px; border-radius: 4px; font-size: 12px; white-space: nowrap; z-index: 10; }
+        .hl:hover .tt { visibility: visible; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 30px; }
+        .card { background: white; padding: 15px; border: 1px solid #eee; border-radius: 4px; cursor: pointer; }
+        .card.sel { border-left: 4px solid #8c92ac; background: #fdfdfd; }
+        .base { font-size: 18px; font-weight: bold; display: block; }
+        .pos { font-size: 10px; color: #999; border: 1px solid #ddd; padding: 0 4px; float: right; }
+        .read { color: #888; font-size: 12px; }
+        .mean { font-size: 13px; color: #666; margin-top: 5px; }
+      `}</style>
+
+      <h1>LANGLAB <span>PRO</span></h1>
+      {!showResult ? (
+        <>
+          <textarea value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="請貼上日文歌詞..." />
+          <button className="btn" onClick={handleParse} disabled={loading}>{loading ? '解析中...' : '開始解析'}</button>
+        </>
+      ) : (
+        <>
+          <button onClick={() => setShowResult(false)} style={{marginBottom:'15px', cursor:'pointer', background:'none', border:'none', color:'#888'}}>← 返回</button>
+          <div className="lyrics-box">{highlightedLyrics}</div>
+          <div className="grid">
+            {words.map(w => (
+              <div key={w.id} className={`card ${selectedIds.has(w.id) ? 'sel' : ''}`} onClick={() => {
+                const n = new Set(selectedIds);
+                n.has(w.id) ? n.delete(w.id) : n.add(w.id);
+                setSelectedIds(n);
+              }}>
+                <span className="pos">{w.pos}</span>
+                <span className="base">{w.base}</span>
+                <div className="read">{w.reading}</div>
+                <div className="mean">{w.meaning}</div>
               </div>
-              <p style={styles.meaning}>{item.meaning}</p>
-            </div>
-          ))}
-        </div>
-      </main>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
-};
-
-const styles = {
-  container: { 
-    maxWidth: '500px', 
-    margin: '0 auto', 
-    padding: '40px 25px', 
-    backgroundColor: '#F9F9F7', 
-    minHeight: '100vh', 
-    fontFamily: '"Helvetica Neue", "Hiragino Sans", sans-serif',
-    color: '#444' 
-  },
-  main: { display: 'flex', flexDirection: 'column' },
-  textarea: { 
-    width: '100%', height: '140px', padding: '10px 0', 
-    border: 'none', borderBottom: '1px solid #E0E0E0', 
-    backgroundColor: 'transparent', fontSize: '16px', 
-    outline: 'none', resize: 'none', lineHeight: '1.8' 
-  },
-  button: { 
-    alignSelf: 'flex-end', marginTop: '15px', padding: '8px 25px',
-    backgroundColor: 'transparent', color: '#888', border: '1px solid #CCC',
-    borderRadius: '2px', cursor: 'pointer', fontSize: '13px', letterSpacing: '2px'
-  },
-  resultList: { marginTop: '50px' },
-  wordRow: { padding: '20px 0', borderBottom: '0.5px solid #EFEFEF' },
-  wordHeader: { display: 'flex', alignItems: 'baseline', gap: '10px' },
-  kanji: { fontSize: '19px', fontWeight: '400' },
-  reading: { fontSize: '12px', color: '#AAA' },
-  meaning: { fontSize: '14px', color: '#777', marginTop: '6px', lineHeight: '1.6' }
-};
+}
 
 export default App;
