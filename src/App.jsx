@@ -19,7 +19,9 @@ const App = () => {
   useEffect(() => {
     const initTokenizer = () => {
       if (window.kuromoji) {
-        window.kuromoji.builder({ dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict/" }).build((err, _tokenizer) => {
+        window.kuromoji.builder({ 
+  dicPath: "https://cdn.jsdelivr.net/npm/kuromoji@0.1.2/dict" // 結尾不要加斜槓試試看
+}).build((err, _tokenizer) => { ... });
           if (err) {
             console.error("Tokenizer Error:", err);
             setStatus('❌ 分詞器載入失敗');
