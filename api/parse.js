@@ -1,105 +1,79 @@
-import admin from 'firebase-admin';
-import kuromoji from 'kuromoji';
-import path from 'path';
-
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  if (serviceAccount.private_key) serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-}
-const db = admin.firestore();
-
-const getTokenizer = () => new Promise((resolve, reject) => {
-  kuromoji.builder({ dicPath: path.join(process.cwd(), "node_modules/kuromoji/dict") })
-    .build((err, t) => err ? reject(err) : resolve(t));
-});
-
 export default async function handler(req, res) {
   const { text } = req.body;
-  if (!text) return res.json({ success: true, words: [] });
-
   try {
     const tokenizer = await getTokenizer();
     
-    // 1. 先用 Kuromoji 拿到初步分詞 (作為基礎)
+    // 1. 生成所有長度 2~5 的組合來查字典
+    const candidates = [];
+    for (let len = 5; len >= 2; len--) {
+      for (let i = 0; i <= text.length - len; i++) {
+        candidates.push(text.substring(i, i + len));
+      }
+    }
+
+    // 2. 批次從 Firestore 抓取這些長詞
+    const foundLongWords = [];
+    const chunks = [];
+    const uniqueCandidates = [...new Set(candidates)];
+    for (let i = 0; i < uniqueCandidates.length; i += 30) {
+      chunks.push(uniqueCandidates.slice(i, i + 30));
+    }
+
+    for (const chunk of chunks) {
+      const snap = await db.collection('dictionary').where('word', 'in', chunk).get();
+      snap.forEach(doc => foundLongWords.push(doc.data()));
+    }
+
+    // 3. 按長度由長到短排序 (最長匹配關鍵)
+    foundLongWords.sort((a, b) => b.word.length - a.word.length);
+
+    let remainingText = text;
+    const finalResults = [];
+
+    // 4. 【核心步驟】先在歌詞中找出這些長詞並「鎖定」
+    foundLongWords.forEach(wordData => {
+      if (remainingText.includes(wordData.word)) {
+        finalResults.push({
+          id: Math.random().toString(36).substr(2, 9),
+          surface: wordData.word,
+          base: wordData.word,
+          reading: wordData.reading,
+          pos: '複合詞',
+          meaning: wordData.meaning,
+          index: text.indexOf(wordData.word) // 紀錄位置以便排序
+        });
+        // 將已匹配的長詞從剩餘文本中用特殊符號替換，避免 Kuromoji 重複處理
+        remainingText = remainingText.replace(new RegExp(wordData.word, 'g'), ' '.repeat(wordData.word.length));
+      }
+    });
+
+    // 5. 剩下沒匹配到長詞的部分，再給 Kuromoji 處理
     const tokens = tokenizer.tokenize(text);
-    
-    // 2. 找出歌詞中所有可能的「長組合」 (2到5個字)
-    const candidateWords = [];
-    for (let i = 0; i < text.length; i++) {
-      for (let len = 5; len >= 2; len--) {
-        if (i + len <= text.length) {
-          candidateWords.push(text.substring(i, i + len));
-        }
-      }
-    }
-    const uniqueCandidates = [...new Set(candidateWords)];
-
-    // 3. 去 Firestore 批次檢查這些「長組合」是否存在於字典中
-    const snapshot = await db.collection('dictionary')
-      .where('word', 'in', uniqueCandidates.slice(0, 30)) // 限制前30個最可能的
-      .get();
-    
-    const foundLongWords = {};
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      foundLongWords[data.word] = data;
-    });
-
-    // 4. 【核心】最長匹配合併邏輯
-    const finalWords = [];
-    let i = 0;
-    while (i < text.length) {
-      let matched = false;
-      // 從最長的長度開始嘗試匹配
-      for (let len = 5; len >= 2; len--) {
-        const sub = text.substring(i, i + len);
-        if (foundLongWords[sub]) {
-          const data = foundLongWords[sub];
-          finalWords.push({
+    tokens.forEach(t => {
+      const base = t.basic_form === '*' ? t.surface_form : t.basic_form;
+      // 如果這個位置已經被長詞佔據了，就跳過
+      const isAlreadyMatched = finalResults.some(r => text.substring(t.word_position - 1, t.word_position - 1 + t.surface_form.length).includes(r.surface));
+      
+      const noise = ['する', 'なる', 'いる', 'ある', 'れる', 'られる', 'せる', 'させる', 'ない'];
+      if (!isAlreadyMatched && ['名詞', '動詞', '形容詞', '副詞'].includes(t.pos) && !noise.includes(base)) {
+        if (base.length > 1 || /[\u4e00-\u9faf]/.test(base)) {
+          finalResults.push({
             id: Math.random().toString(36).substr(2, 9),
-            surface: sub,
-            base: sub,
-            reading: data.reading || '',
-            pos: '複合詞',
-            meaning: data.meaning || ''
+            surface: t.surface_form,
+            base: base,
+            reading: t.reading,
+            pos: t.pos,
+            meaning: '', // 短詞意思可視需求補查
+            index: t.word_position - 1
           });
-          i += len; // 成功匹配，跳過這些字
-          matched = true;
-          break;
         }
       }
-
-      if (!matched) {
-        // 如果長詞沒匹配到，就用原本 Kuromoji 拆出來的單個詞
-        const token = tokens.find(t => t.word_position === i + 1);
-        if (token) {
-          const base = token.basic_form === '*' ? token.surface_form : token.basic_form;
-          // 過濾噪音邏輯依然保留
-          const noise = ['する', 'なる', 'いる', 'ある', 'れる', 'られる', 'ない'];
-          if (['名詞', '動詞', '形容詞', '副詞'].includes(token.pos) && !noise.includes(base)) {
-            // 此處可再補一個單個詞的 Firestore 查詢
-            finalWords.push({
-              id: Math.random().toString(36).substr(2, 9),
-              surface: token.surface_form,
-              base: base,
-              reading: token.reading,
-              pos: token.pos,
-              meaning: '' // 單個詞的解釋可從 snapshot 裡拿
-            });
-          }
-          i += token.surface_form.length;
-        } else {
-          i++;
-        }
-      }
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      words: finalWords.filter((v, i, a) => a.findIndex(t => t.base === v.base) === i) 
     });
 
+    // 6. 最後依照在歌詞出現的順序排序
+    const sorted = finalResults.sort((a, b) => a.index - b.index);
+
+    res.status(200).json({ success: true, words: sorted });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
