@@ -53,7 +53,9 @@ function App() {
         textarea { width: 100%; height: 200px; padding: 20px; border: 1px solid #e0e0e0; border-radius: 4px; font-size: 18px; outline: none; box-sizing: border-box; }
         .btn { width: 100%; padding: 15px; background: #555; color: white; border: none; border-radius: 4px; margin-top: 20px; cursor: pointer; }
         .lyrics-box { background: white; padding: 30px; border-radius: 4px; line-height: 2.2; font-size: 20px; white-space: pre-wrap; border: 1px solid #eee; }
-        .hl { border-bottom: 2px solid #8c92ac; position: relative; cursor: help; }
+        .hl { border-bottom: 2px solid #8c92ac; position: relative; cursor: help;margin: 0 1px;       
+        /* 讓左右產生 1px 的間距，底線就不會黏住 */
+        padding-bottom: 2px; /* 稍微拉開文字與底線的距離，看起來更清爽 */ }
         .tt { visibility: hidden; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 5px 10px; border-radius: 4px; font-size: 12px; white-space: nowrap; z-index: 10; }
         .hl:hover .tt { visibility: visible; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 30px; }
