@@ -15,67 +15,92 @@ const getTokenizer = () => new Promise((resolve, reject) => {
 });
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).end();
   const { text } = req.body;
+  if (!text) return res.json({ success: true, words: [] });
 
   try {
     const tokenizer = await getTokenizer();
+    
+    // 1. 先用 Kuromoji 拿到初步分詞 (作為基礎)
     const tokens = tokenizer.tokenize(text);
     
-    // --- 噪音過濾名單 ---
-    const noiseBlacklist = ['する', 'なる', 'いる', 'ある', 'れる', 'られる', 'せる', 'させる', 'ない', 'た', 'だ'];
+    // 2. 找出歌詞中所有可能的「長組合」 (2到5個字)
+    const candidateWords = [];
+    for (let i = 0; i < text.length; i++) {
+      for (let len = 5; len >= 2; len--) {
+        if (i + len <= text.length) {
+          candidateWords.push(text.substring(i, i + len));
+        }
+      }
+    }
+    const uniqueCandidates = [...new Set(candidateWords)];
 
-    const wordsToQuery = tokens
-      .filter(t => {
-        const base = t.basic_form === '*' ? t.surface_form : t.basic_form;
-        
-        // 1. 只留名、動、形、副
-        if (!['名詞', '動詞', '形容詞', '副詞'].includes(t.pos)) return false;
-        
-        // 2. 過濾黑名單裡的基礎詞與語法碎片
-        if (noiseBlacklist.includes(base)) return false;
-        
-        // 3. 過濾長度為 1 的非漢字 (如 'に', 'を', 'て')
-        if (base.length === 1 && !/[\u4e00-\u9faf]/.test(base)) return false;
-
-        return true;
-      })
-      .map(t => ({
-        surface: t.surface_form,
-        base: t.basic_form === '*' ? t.surface_form : t.basic_form,
-        pos: t.pos,
-        reading: t.reading
-      }));
-
-    const uniqueBases = [...new Set(wordsToQuery.map(w => w.base))];
-    if (uniqueBases.length === 0) return res.json({ success: true, words: [] });
-
-    const results = [];
-    // Firestore 查詢限制一次最多 30 個 IN
+    // 3. 去 Firestore 批次檢查這些「長組合」是否存在於字典中
     const snapshot = await db.collection('dictionary')
-      .where('word', 'in', uniqueBases.slice(0, 30))
+      .where('word', 'in', uniqueCandidates.slice(0, 30)) // 限制前30個最可能的
       .get();
     
+    const foundLongWords = {};
     snapshot.forEach(doc => {
       const data = doc.data();
-      const original = wordsToQuery.find(w => w.base === data.word);
-      results.push({
-        id: Math.random().toString(36).substr(2, 9),
-        surface: original?.surface || data.word,
-        base: data.word,
-        reading: data.reading || original?.reading || '',
-        pos: original?.pos || '單字',
-        meaning: data.meaning || ''
-      });
+      foundLongWords[data.word] = data;
     });
 
-    // 依據歌詞出現順序排序，而不是依據資料庫搜尋結果
-    const sortedResults = uniqueBases
-      .map(base => results.find(r => r.base === base))
-      .filter(Boolean);
+    // 4. 【核心】最長匹配合併邏輯
+    const finalWords = [];
+    let i = 0;
+    while (i < text.length) {
+      let matched = false;
+      // 從最長的長度開始嘗試匹配
+      for (let len = 5; len >= 2; len--) {
+        const sub = text.substring(i, i + len);
+        if (foundLongWords[sub]) {
+          const data = foundLongWords[sub];
+          finalWords.push({
+            id: Math.random().toString(36).substr(2, 9),
+            surface: sub,
+            base: sub,
+            reading: data.reading || '',
+            pos: '複合詞',
+            meaning: data.meaning || ''
+          });
+          i += len; // 成功匹配，跳過這些字
+          matched = true;
+          break;
+        }
+      }
 
-    res.status(200).json({ success: true, words: sortedResults });
-  } catch (e) { 
-    res.status(500).json({ success: false, error: e.message }); 
+      if (!matched) {
+        // 如果長詞沒匹配到，就用原本 Kuromoji 拆出來的單個詞
+        const token = tokens.find(t => t.word_position === i + 1);
+        if (token) {
+          const base = token.basic_form === '*' ? token.surface_form : token.basic_form;
+          // 過濾噪音邏輯依然保留
+          const noise = ['する', 'なる', 'いる', 'ある', 'れる', 'られる', 'ない'];
+          if (['名詞', '動詞', '形容詞', '副詞'].includes(token.pos) && !noise.includes(base)) {
+            // 此處可再補一個單個詞的 Firestore 查詢
+            finalWords.push({
+              id: Math.random().toString(36).substr(2, 9),
+              surface: token.surface_form,
+              base: base,
+              reading: token.reading,
+              pos: token.pos,
+              meaning: '' // 單個詞的解釋可從 snapshot 裡拿
+            });
+          }
+          i += token.surface_form.length;
+        } else {
+          i++;
+        }
+      }
+    }
+
+    res.status(200).json({ 
+      success: true, 
+      words: finalWords.filter((v, i, a) => a.findIndex(t => t.base === v.base) === i) 
+    });
+
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 }
