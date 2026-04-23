@@ -1,5 +1,23 @@
 import admin from 'firebase-admin';
 
+export default async function handler(req, res) {
+  try {
+    const rawConfig = process.env.FIREBASE_SERVICE_ACCOUNT;
+    
+    if (!rawConfig) {
+      console.error("❌ 找不到環境變數 FIREBASE_SERVICE_ACCOUNT");
+      return res.status(500).json({ error: "Environment variable missing" });
+    }
+
+    // 處理可能存在的換行符號問題
+    const serviceAccount = JSON.parse(rawConfig);
+
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+    }
+
 if (!admin.apps.length) {
   // 這裡建議將 serviceAccount 內容放入 Vercel 的 Environment Variables
   // 暫時測試可以先用讀取檔案的方式
