@@ -1,49 +1,52 @@
 import admin from 'firebase-admin';
 
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+// 初始化 Firebase
+const rawConfig = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (rawConfig && !admin.apps.length) {
+  const serviceAccount = JSON.parse(rawConfig);
+  if (serviceAccount.private_key) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
   }
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
+
+const db = admin.firestore();
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: 'No text provided' });
 
   try {
-    const rawConfig = process.env.FIREBASE_SERVICE_ACCOUNT;
-    
-    if (!rawConfig) {
-      throw new Error('FIREBASE_SERVICE_ACCOUNT is missing in environment variables');
+    // 1. 簡單的分詞 (未來可以升級為 Kuromoji)
+    // 這裡先抓出所有的漢字、平假名、片假名區塊
+    const potentialWords = [...new Set(text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]+/g) || [])];
+
+    // 2. 分批從 Firestore 查詢 (Firestore 'in' 限制一次最多 30 個項目)
+    const results = [];
+    const chunks = [];
+    for (let i = 0; i < potentialWords.length; i += 30) {
+      chunks.push(potentialWords.slice(i, i + 30));
     }
 
-    if (!admin.apps.length) {
-      // 1. 先解析 JSON
-      const serviceAccount = JSON.parse(rawConfig);
+    for (const chunk of chunks) {
+      const snapshot = await db.collection('dictionary') // 確保你的 collection 名字是 'dictionary'
+        .where('word', 'in', chunk)
+        .get();
       
-      // 2. 關鍵修正：修復私鑰中的換行符號問題
-      if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-      }
-
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-      });
+      snapshot.forEach(doc => results.push(doc.data()));
     }
 
-    const db = admin.firestore();
-    const { text } = req.body;
-
-    // 簡單測試：嘗試從資料庫抓一筆資料
-    const snapshot = await db.collection('dictionary').limit(1).get();
-    
+    // 3. 回傳查詢到的單字資料
     return res.status(200).json({ 
       success: true,
-      message: 'Firestore connected!',
-      dataCount: snapshot.size,
-      inputLength: text ? text.length : 0
+      words: results 
     });
 
   } catch (error) {
-    console.error('Final API Error:', error.message);
-    return res.status(500).json({ 
-      error: 'Server error occurred',
-      message: error.message 
-    });
+    return res.status(500).json({ error: error.message });
   }
 }
